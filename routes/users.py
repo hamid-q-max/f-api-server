@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from models.user import UserResponse, UserCreate, UserUpdate
 from auth import decode_token, hash_password
@@ -11,6 +12,13 @@ logger = logging.getLogger(__name__)
 security = HTTPBearer(auto_error=False)
 
 
+def _api_error(status_code: int, message: str, type_: str):
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": status_code, "message": message, "type": type_},
+    )
+
+
 def _get_auth_payload(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
@@ -19,11 +27,11 @@ def _get_auth_payload(
     Raises 401 if the token is missing or invalid.
     """
     if credentials is None or not credentials.credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+        return {"__error__": {"status": status.HTTP_401_UNAUTHORIZED, "message": "Missing bearer token", "type": "unauthorized"}}
     try:
         return decode_token(credentials.credentials)
     except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+        return {"__error__": {"status": status.HTTP_401_UNAUTHORIZED, "message": "Invalid or expired token", "type": "unauthorized"}}
 
 
 @router.get("/api/users/{user_id}", response_model=UserResponse)
@@ -36,7 +44,7 @@ async def get_user(user_id: int):
     )
     row = cursor.fetchone()
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        return _api_error(status.HTTP_404_NOT_FOUND, "User not found", "not_found")
 
     user_id_db, username, email, is_active, role = row
     return UserResponse(
@@ -74,14 +82,18 @@ async def update_user(user_id: int, update: UserUpdate, payload: dict = Depends(
 
     Only admins may update other users or change roles.
     """
+    if payload.get("__error__"):
+        err = payload["__error__"]
+        return _api_error(err["status"], err["message"], err["type"])
+
     requester_id = payload.get("user_id")
     requester_role = payload.get("role")
 
     if requester_role != "admin" and requester_id != user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        return _api_error(status.HTTP_403_FORBIDDEN, "Forbidden", "forbidden")
 
     if update.role is not None and requester_role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins may change roles")
+        return _api_error(status.HTTP_403_FORBIDDEN, "Only admins may change roles", "forbidden")
 
     fields = []
     params = []
@@ -115,11 +127,15 @@ async def delete_user(user_id: int, payload: dict = Depends(_get_auth_payload)):
 
     Only admins may delete other users; users may delete their own account.
     """
+    if payload.get("__error__"):
+        err = payload["__error__"]
+        return _api_error(err["status"], err["message"], err["type"])
+
     requester_id = payload.get("user_id")
     requester_role = payload.get("role")
 
     if requester_role != "admin" and requester_id != user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        return _api_error(status.HTTP_403_FORBIDDEN, "Forbidden", "forbidden")
 
     conn = sqlite3.connect("users.db")
     conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
@@ -130,8 +146,12 @@ async def delete_user(user_id: int, payload: dict = Depends(_get_auth_payload)):
 @router.get("/api/admin/users")
 async def list_all_users(payload: dict = Depends(_get_auth_payload)):
     """List all users (admin-only)."""
+    if payload.get("__error__"):
+        err = payload["__error__"]
+        return _api_error(err["status"], err["message"], err["type"])
+
     if payload.get("role") != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+        return _api_error(status.HTTP_403_FORBIDDEN, "Admin access required", "forbidden")
 
     conn = sqlite3.connect("users.db")
     cursor = conn.execute("SELECT id, username, email, is_active, role FROM users")
