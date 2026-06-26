@@ -10,12 +10,20 @@ import time
 import jwt
 
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY")
-if not SECRET_KEY:
-    raise RuntimeError("JWT_SECRET_KEY environment variable is required")
-
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_TTL_SECONDS = int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "3600"))
+
+
+def get_jwt_secret_key() -> str:
+    """Return the JWT secret key.
+
+    Note: We intentionally avoid validating this at import-time so the service can
+    start in dev/test environments where auth endpoints may not be exercised.
+    """
+    secret = os.getenv("JWT_SECRET_KEY")
+    if not secret:
+        raise RuntimeError("JWT_SECRET_KEY environment variable is required")
+    return secret
 
 # PBKDF2 parameters
 _PBKDF2_ITERATIONS = int(os.getenv("PASSWORD_HASH_ITERATIONS", "200000"))
@@ -59,7 +67,7 @@ def create_access_token(user_id: int, role: str = "user") -> str:
         "iat": now,
         "exp": now + ACCESS_TOKEN_TTL_SECONDS,
     }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(payload, get_jwt_secret_key(), algorithm=ALGORITHM)
 
 
 def decode_token(token: str) -> dict:
@@ -67,7 +75,7 @@ def decode_token(token: str) -> dict:
 
     Raises jwt.InvalidTokenError on validation failures.
     """
-    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    return jwt.decode(token, get_jwt_secret_key(), algorithms=[ALGORITHM])
 
 
 def is_admin(token: str) -> bool:
