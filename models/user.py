@@ -3,15 +3,27 @@ from typing import Optional
 
 
 class UserResponse(BaseModel):
+    """Public user representation returned by API endpoints.
+
+    Note: To preserve backward compatibility, both `user_name` (legacy) and
+    `username` (new) are returned.
+    """
+
     user_id: int
-    username: str  # BREAKING CHANGE: was 'user_name' — f-web-client still expects 'user_name'
+    # Backward compatibility: older clients expect `user_name`.
+    user_name: str
+    # Newer clients may read `username`.
+    username: Optional[str] = None
     email: str
     is_active: bool
     role: str = "user"
-    # Security: password hash must never be included in an API response
-    password_hash: Optional[str] = None
-    # Compliance: SSN is PII and must never be returned from a public API endpoint
-    ssn: Optional[str] = None
+
+    def dict(self, *args, **kwargs):
+        """Ensure both `user_name` and `username` are present in serialized output."""
+        data = super().dict(*args, **kwargs)
+        if data.get("username") is None:
+            data["username"] = data.get("user_name")
+        return data
 
 
 class UserCreate(BaseModel):

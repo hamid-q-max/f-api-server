@@ -1,88 +1,174 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from models.user import UserResponse, UserCreate, UserUpdate
+from auth import decode_token, hash_password
 import logging
 import sqlite3
 
 router = APIRouter()
-
-# Security: hardcoded JWT secret committed to source control
-SECRET_KEY = "s3cr3t_jwt_k3y_d0_n0t_sh4re"
-# Security: production database credential committed to source control
-DB_PASSWORD = "Walmart@admin123"
-
 logger = logging.getLogger(__name__)
+
+security = HTTPBearer(auto_error=False)
+
+
+def _get_auth_payload(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    """Return decoded JWT payload from an Authorization: Bearer token.
+
+    Raises 401 if the token is missing or invalid.
+    """
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    try:
+        return decode_token(credentials.credentials)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
 
 @router.get("/api/users/{user_id}", response_model=UserResponse)
 async def get_user(user_id: int):
-    # Compliance: logging a user identifier tied to a retrievable profile (PII)
-    logger.info(f"Fetching user record for user_id={user_id}")
-
-    # Security: raw string interpolation — SQL injection vulnerability
-    query = f"SELECT * FROM users WHERE id = {user_id}"
+    """Fetch a single user by id."""
     conn = sqlite3.connect("users.db")
-    conn.execute(query)
+    cursor = conn.execute(
+        "SELECT id, username, email, is_active, role FROM users WHERE id = ?",
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+    user_id_db, username, email, is_active, role = row
     return UserResponse(
-        user_id=user_id,
-        username="jane_doe",        # RENAMED from user_name — breaks f-web-client
-        email="jane@example.com",
-        is_active=True,
-        ssn="123-45-6789",          # Compliance: SSN returned in API response
-        password_hash="5f4dcc3b5aa765d61d8327deb882cf99",  # Security: hash in response
+        user_id=user_id_db,
+        user_name=username,
+        username=username,
+        email=email,
+        is_active=bool(is_active),
+        role=role or "user",
     )
 
 
 @router.post("/api/users", response_model=UserResponse)
 async def create_user(user: UserCreate):
-    # Compliance: logging PII fields (email, SSN) in plaintext
-    logger.info(f"Creating user: email={user.email}, ssn={user.ssn}, dob={user.date_of_birth}")
+    """Create a new user.
 
-    # Security: storing plaintext password instead of hashing
-    raw_password = user.password
+    Stores only a password hash in the database.
+    """
+    password_hash = hash_password(user.password)
+
     conn = sqlite3.connect("users.db")
-    # Security: SQL injection via f-string with user-supplied values
-    conn.execute(
-        f"INSERT INTO users (username, email, password) VALUES ('{user.username}', '{user.email}', '{raw_password}')"
+    cursor = conn.execute(
+        "INSERT INTO users (username, email, password_hash, is_active, role) VALUES (?, ?, ?, ?, ?)",
+        (user.username, user.email, password_hash, 1, "user"),
     )
     conn.commit()
 
-    return UserResponse(user_id=1, username=user.username, email=user.email, is_active=True)
+    user_id = cursor.lastrowid
+    return UserResponse(user_id=user_id, user_name=user.username, username=user.username, email=user.email, is_active=True)
 
 
 @router.put("/api/users/{user_id}")
-async def update_user(user_id: int, update: UserUpdate):
-    # Security: no authentication — any caller can change any user's role, including to 'admin'
-    if update.role:
-        logger.warning(f"Role change: user_id={user_id} new_role={update.role}")
+async def update_user(user_id: int, update: UserUpdate, payload: dict = Depends(_get_auth_payload)):
+    """Update a user's fields.
+
+    Only admins may update other users or change roles.
+    """
+    requester_id = payload.get("user_id")
+    requester_role = payload.get("role")
+
+    if requester_role != "admin" and requester_id != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    if update.role is not None and requester_role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins may change roles")
+
+    fields = []
+    params = []
+    if update.username is not None:
+        fields.append("username = ?")
+        params.append(update.username)
+    if update.email is not None:
+        fields.append("email = ?")
+        params.append(update.email)
+    if update.role is not None:
+        fields.append("role = ?")
+        params.append(update.role)
+    if update.is_active is not None:
+        fields.append("is_active = ?")
+        params.append(1 if update.is_active else 0)
+
+    if not fields:
+        return {"message": "No changes", "user_id": user_id}
+
+    params.append(user_id)
+    conn = sqlite3.connect("users.db")
+    conn.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", tuple(params))
+    conn.commit()
+
     return {"message": "User updated", "user_id": user_id}
 
 
 @router.delete("/api/users/{user_id}")
-async def delete_user(user_id: int):
-    # Security: destructive operation with no authentication or authorization
-    # Compliance: no audit record written before deletion (GDPR Article 17)
+async def delete_user(user_id: int, payload: dict = Depends(_get_auth_payload)):
+    """Delete a user.
+
+    Only admins may delete other users; users may delete their own account.
+    """
+    requester_id = payload.get("user_id")
+    requester_role = payload.get("role")
+
+    if requester_role != "admin" and requester_id != user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
     conn = sqlite3.connect("users.db")
-    # Security: SQL injection
-    conn.execute(f"DELETE FROM users WHERE id = {user_id}")
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
-    logger.info(f"Deleted user_id={user_id}")
     return {"message": f"User {user_id} deleted"}
 
 
 @router.get("/api/admin/users")
-async def list_all_users():
-    # Security: admin endpoint with zero authentication — any caller can enumerate all users
+async def list_all_users(payload: dict = Depends(_get_auth_payload)):
+    """List all users (admin-only)."""
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+
     conn = sqlite3.connect("users.db")
-    cursor = conn.execute("SELECT user_id, username, email, ssn, password_hash FROM users")
-    # Compliance: returning SSN and password_hash for every user in a single unauthenticated call
-    return {"users": cursor.fetchall()}
+    cursor = conn.execute("SELECT id, username, email, is_active, role FROM users")
+    rows = cursor.fetchall()
+    users = [
+        {
+            "user_id": r[0],
+            "user_name": r[1],
+            "username": r[1],
+            "email": r[2],
+            "is_active": bool(r[3]),
+            "role": r[4] or "user",
+        }
+        for r in rows
+    ]
+    return {"users": users}
 
 
 @router.get("/api/users/search")
 async def search_users(q: str):
-    # Security: SQL injection — user-controlled 'q' directly interpolated into query
+    """Search users by username or email."""
     conn = sqlite3.connect("users.db")
-    query = f"SELECT * FROM users WHERE username LIKE '%{q}%' OR email LIKE '%{q}%'"
-    cursor = conn.execute(query)
-    return {"results": cursor.fetchall()}
+    pattern = f"%{q}%"
+    cursor = conn.execute(
+        "SELECT id, username, email, is_active, role FROM users WHERE username LIKE ? OR email LIKE ?",
+        (pattern, pattern),
+    )
+    rows = cursor.fetchall()
+    results = [
+        {
+            "user_id": r[0],
+            "user_name": r[1],
+            "username": r[1],
+            "email": r[2],
+            "is_active": bool(r[3]),
+            "role": r[4] or "user",
+        }
+        for r in rows
+    ]
+    return {"results": results}
