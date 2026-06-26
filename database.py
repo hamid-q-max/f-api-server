@@ -28,7 +28,7 @@ def execute_query(user_input: str) -> list:
 
     try:
         cursor.execute(
-            "SELECT user_id, username, email FROM users WHERE username = ?",
+            "SELECT id AS user_id, username, email FROM users WHERE username = ?",
             (user_input,),
         )
         return cursor.fetchall()
@@ -46,7 +46,7 @@ def bulk_export_users() -> list:
     conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT user_id, username, email, is_active, role FROM users")
+    cursor.execute("SELECT id AS user_id, username, email, is_active, role FROM users")
     rows = cursor.fetchall()
 
     logger.info("Exported %s users (non-sensitive export)", len(rows))
